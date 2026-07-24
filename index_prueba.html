@@ -1462,7 +1462,7 @@ let db = null, auth = null, currentUser = null, currentUserData = null;
 let qaIsAdmin = false; // set immediately when role is confirmed, used by all role-gated UI
 
 function initFirebase() {
-  const raw = localStorage.getItem('qa_firebase_config');
+  const raw = localStorage.getItem('prueba_qa_firebase_config');
   if (!raw) return false;
   try {
     const cfg = JSON.parse(raw);
@@ -1481,7 +1481,7 @@ function guardarFirebaseConfig() {
     const cfg = JSON.parse(raw);
     if (!cfg.apiKey || !cfg.projectId) throw new Error('Faltan campos requeridos (apiKey, projectId)');
     if (typeof firebase === 'undefined') throw new Error('Los scripts de Firebase no cargaron. Verifica tu conexión o desactiva bloqueadores de anuncios y recarga la página.');
-    localStorage.setItem('qa_firebase_config', JSON.stringify(cfg));
+    localStorage.setItem('prueba_qa_firebase_config', JSON.stringify(cfg));
     // Initialize Firebase
     if (!firebase.apps.length) firebase.initializeApp(cfg);
     else firebase.app(); // re-use existing
@@ -1740,17 +1740,17 @@ async function cargarConfigFirestore() {
     snap.forEach(doc => {
       if (doc.id === '_groq_') {
         // Groq key compartida — solo aplicar si el usuario no tiene la suya propia
-        const localKey = localStorage.getItem('qa_groq_key');
+        const localKey = localStorage.getItem('prueba_qa_groq_key');
         const sharedKey = doc.data().groq_key;
         if (sharedKey && (!localKey || localKey !== sharedKey)) {
-          localStorage.setItem('qa_groq_key', sharedKey);
+          localStorage.setItem('prueba_qa_groq_key', sharedKey);
           // Pre-fill the config input too
           const inp = document.getElementById('key-groq');
           if (inp) inp.value = sharedKey;
           console.info('Groq key cargada desde configuración compartida.');
         }
       } else {
-        localStorage.setItem('qa_calibracion_' + doc.id, JSON.stringify(doc.data()));
+        localStorage.setItem('prueba_qa_calibracion_' + doc.id, JSON.stringify(doc.data()));
       }
     });
   } catch(e) { console.warn('cargarConfigFirestore error:', e); }
@@ -1779,7 +1779,7 @@ async function crearUsuario() {
   if (pass.length < 6) { errEl.textContent = 'La contraseña debe tener al menos 6 caracteres.'; errEl.style.display = 'block'; return; }
   try {
     // Create user with secondary app instance to avoid logging out admin
-    const cfg = JSON.parse(localStorage.getItem('qa_firebase_config'));
+    const cfg = JSON.parse(localStorage.getItem('prueba_qa_firebase_config'));
     if (!_secondaryApp) _secondaryApp = firebase.initializeApp(cfg, 'secondary');
     const secAuth = firebase.auth(_secondaryApp);
     const cred = await secAuth.createUserWithEmailAndPassword(email, pass);
@@ -1886,7 +1886,7 @@ async function resetPassword(uid, email) {
   if (!nueva || nueva.length < 6) { if(nueva !== null) alert('La contraseña debe tener al menos 6 caracteres.'); return; }
   // Use secondary app to update password without affecting current session
   try {
-    const cfg = JSON.parse(localStorage.getItem('qa_firebase_config'));
+    const cfg = JSON.parse(localStorage.getItem('prueba_qa_firebase_config'));
     if (!_secondaryApp) _secondaryApp = firebase.initializeApp(cfg, 'secondary');
     const secAuth = firebase.auth(_secondaryApp);
     // We need to re-authenticate the target user to change password
@@ -2038,13 +2038,13 @@ async function cargarGroqKeys() {
       groqKeyIndex = data.groq_key_index || 0;
       if (groqKeyIndex >= groqKeys.length) groqKeyIndex = 0;
       // Sincronizar localStorage con la key activa
-      localStorage.setItem('qa_groq_key', groqKeys[groqKeyIndex]);
+      localStorage.setItem('prueba_qa_groq_key', groqKeys[groqKeyIndex]);
       const inp = document.getElementById('key-groq');
       if (inp) inp.value = groqKeys[groqKeyIndex];
     } else if (data.groq_key) {
       groqKeys = [data.groq_key];
       groqKeyIndex = 0;
-      localStorage.setItem('qa_groq_key', data.groq_key);
+      localStorage.setItem('prueba_qa_groq_key', data.groq_key);
     }
     console.log(`Groq: ${groqKeys.length} key(s) cargada(s), usando índice ${groqKeyIndex}`);
   } catch(e) {
@@ -2055,7 +2055,7 @@ async function cargarGroqKeys() {
 // Obtiene la key activa actual
 function getGroqKeyActiva() {
   if (groqKeys.length > 0) return groqKeys[groqKeyIndex];
-  return localStorage.getItem('qa_groq_key') || '';
+  return localStorage.getItem('prueba_qa_groq_key') || '';
 }
 
 // Rota a la siguiente key cuando hay 429 — devuelve la nueva key o null si todas agotadas
@@ -2065,7 +2065,7 @@ async function rotarGroqKey() {
   groqKeyIndex = (groqKeyIndex + 1) % groqKeys.length;
   if (groqKeyIndex === anterior) return null; // Ya dio la vuelta completa
   const nuevaKey = groqKeys[groqKeyIndex];
-  localStorage.setItem('qa_groq_key', nuevaKey);
+  localStorage.setItem('prueba_qa_groq_key', nuevaKey);
   const inp = document.getElementById('key-groq');
   if (inp) inp.value = nuevaKey;
   // Guardar índice activo en Firestore para sincronizar entre usuarios
@@ -2096,7 +2096,7 @@ async function fetchGroqConRotacion(url, opciones) {
         const idx = doc.data().groq_key_index || 0;
         if (idx !== groqKeyIndex && idx < groqKeys.length) {
           groqKeyIndex = idx;
-          localStorage.setItem('qa_groq_key', groqKeys[groqKeyIndex]);
+          localStorage.setItem('prueba_qa_groq_key', groqKeys[groqKeyIndex]);
         }
       }
     } catch(e) {}
@@ -3150,7 +3150,7 @@ function liberarWakeLock() {
 // INIT
 // ═══════════════════════════════════════════════
 window.onload = () => {
-  const g = localStorage.getItem('qa_groq_key');
+  const g = localStorage.getItem('prueba_qa_groq_key');
   if (g) { document.getElementById('key-groq').value = g; }
   // Init Firebase
   if (initFirebase()) {
@@ -3368,8 +3368,8 @@ async function guardarKeys() {
     .map(inp => inp.value.trim()).filter(Boolean);
   const todasLasKeys = [keyPrincipal, ...keysAdicionales];
 
-  localStorage.setItem('qa_groq_key', keyPrincipal);
-  localStorage.setItem('qa_or_key', 'not-needed');
+  localStorage.setItem('prueba_qa_groq_key', keyPrincipal);
+  localStorage.setItem('prueba_qa_or_key', 'not-needed');
 
   // Cargar en memoria para rotación inmediata
   groqKeys = todasLasKeys;
@@ -3393,7 +3393,7 @@ function abrirConfig() { document.getElementById('setup-overlay').classList.remo
 function cargarConfig(modelo) {
   modelo = modelo || 'tradicional';
   try {
-    const s = localStorage.getItem('qa_calibracion_'+modelo);
+    const s = localStorage.getItem('prueba_qa_calibracion_'+modelo);
     if (s) {
       const stored = JSON.parse(s);
       // Si la versión del schema no coincide, descartar pesos guardados y usar defaults
@@ -3402,7 +3402,7 @@ function cargarConfig(modelo) {
         console.info('QA: esquema de pesos actualizado (' + (stored._pesos_version||'legacy') + ' → ' + PESOS_SCHEMA_VERSION + '), reseteando pesos a defaults del Excel.');
         stored.pesos = getDefaultPesos(modelo);
         stored._pesos_version = PESOS_SCHEMA_VERSION;
-        localStorage.setItem('qa_calibracion_'+modelo, JSON.stringify(stored));
+        localStorage.setItem('prueba_qa_calibracion_'+modelo, JSON.stringify(stored));
       }
       return stored;
     }
@@ -3412,7 +3412,7 @@ function cargarConfig(modelo) {
 function persistirConfig(cfg, modelo) {
   modelo = modelo || 'tradicional';
   cfg._pesos_version = PESOS_SCHEMA_VERSION; // stamp version on every save
-  localStorage.setItem('qa_calibracion_'+modelo, JSON.stringify(cfg));
+  localStorage.setItem('prueba_qa_calibracion_'+modelo, JSON.stringify(cfg));
   persistirConfigFirestore(cfg, modelo); // sync to Firestore
 }
 
@@ -4078,7 +4078,7 @@ ${naKeys.has('etq_control')?'':'etq_control (6.5) — Mute, tiempos de espera y 
 // ═══════════════════════════════════════════════
 async function procesarLlamada() {
   if (!audioFile) { alert('Por favor selecciona un archivo de audio.'); return; }
-  const groqKey = localStorage.getItem('qa_groq_key');
+  const groqKey = localStorage.getItem('prueba_qa_groq_key');
   if (!groqKey) { abrirConfig(); return; }
   const agente        = document.getElementById('f-agente').value.trim() || 'No especificado';
   const tipo          = document.getElementById('f-tipo').value;
@@ -4727,7 +4727,7 @@ function limpiarBatch() {
 async function iniciarBatch() {
   const pending = batchQueue.filter(i => i.status==='pending');
   if (!pending.length) { alert('No hay llamadas pendientes en la cola.'); return; }
-  const groqKey = localStorage.getItem('qa_groq_key');
+  const groqKey = localStorage.getItem('prueba_qa_groq_key');
   if (!groqKey) { abrirConfig(); return; }
 
   const tipo    = document.getElementById('b-tipo').value;
@@ -5215,7 +5215,7 @@ async function eliminarEvaluacion(id) {
 
   // 2. Quitar de localStorage y array local solo si Firestore tuvo éxito
   historial = historial.filter(h => h.id !== id);
-  localStorage.setItem('qa_v4_hist', JSON.stringify(historial.slice(0, 200)));
+  localStorage.setItem('prueba_qa_v4_hist', JSON.stringify(historial.slice(0, 200)));
   renderHistorial();
 }
 
@@ -5964,7 +5964,7 @@ function showChartTip(e,el){const tip=document.getElementById('rep-tooltip');if(
 function hideChartTip(){const tip=document.getElementById('rep-tooltip');if(tip)tip.style.display='none';}
 
 async function generarPlanIA() {
-  const groqKey=localStorage.getItem('qa_groq_key'); if(!groqKey){abrirConfig();return;}
+  const groqKey=localStorage.getItem('prueba_qa_groq_key'); if(!groqKey){abrirConfig();return;}
   const data=filtrarPorPeriodo(); if(!data.length){alert('Sin datos en el período.');return;}
   const btn=document.getElementById('btn-gen-plan'), box=document.getElementById('rep-plan-box');
   btn.disabled=true; btn.innerHTML='<span class="spinning">◌</span> Generando...';
@@ -6297,7 +6297,7 @@ async function preguntarPlanIA() {
   if (!pregunta || !window._planChatContext) return;
   input.value = '';
 
-  const groqKey = localStorage.getItem('qa_groq_key');
+  const groqKey = localStorage.getItem('prueba_qa_groq_key');
   if (!groqKey) { alert('Configura tu API key primero.'); return; }
 
   // Mostrar mensaje del usuario
@@ -6720,7 +6720,7 @@ function toggleTopFromList(id) {
 let _docTopContent = '';
 
 async function generarDocumentoTop() {
-  const groqKey = localStorage.getItem('qa_groq_key');
+  const groqKey = localStorage.getItem('prueba_qa_groq_key');
   if (!groqKey) { abrirConfig(); return; }
   const modeloF = document.getElementById('top-modelo-filter')?.value || '__todos__';
   let tops = historial.filter(h=>h.es_top);
