@@ -552,6 +552,10 @@ header{position:sticky;top:0;z-index:200;background:rgba(7,9,15,0.95);backdrop-f
         <option value="gemini">Gemini</option>
       </select>
       <p class="hint" style="margin-top:6px">Determina cuál de los dos usa la evaluación de llamadas. Cámbialo aquí cuando quieras — no requiere borrar las keys del otro.</p>
+      <label style="display:flex; align-items:center; gap:8px; margin-top:12px; cursor:pointer;">
+        <input type="checkbox" id="chk-transcripcion-fallback" checked style="width:auto;">
+        <span style="font-size:12px; color:var(--muted);">Al transcribir audio: si el proveedor activo falla, intentar automáticamente con el otro (si tiene key configurada)</span>
+      </label>
     </div>
 
     <div class="setup-field">
@@ -2254,7 +2258,7 @@ async function obtenerModelosDisponiblesGemini() {
 
 // Wrapper de rotación para Gemini — misma filosofía que fetchGroqConRotacion pero adaptado
 // al formato de Gemini (key por query param, generationConfig con JSON forzado)
-async function fetchGeminiConRotacion(modeloNombre, prompt, temperature, maxTokens) {
+async function fetchGeminiConRotacion(modeloNombre, prompt, temperature, maxTokens, jsonMode = true) {
   if (geminiKeys.length === 0 && db) await cargarGeminiKeys();
 
   const debeRotar = (status, txt) =>
@@ -2267,12 +2271,11 @@ async function fetchGeminiConRotacion(modeloNombre, prompt, temperature, maxToke
     const keyActiva = getGeminiKeyActiva();
     if (!keyActiva) return { ok:false, status:401, text: async()=>'Sin API key de Gemini configurada', json: async()=>({error:{message:'Sin API key'}}) };
     try {
+      const generationConfig = { temperature, maxOutputTokens: maxTokens };
+      if (jsonMode) generationConfig.responseMimeType = 'application/json';
       const resp = await fetch(`${GEMINI_API_BASE}models/${modeloNombre}:generateContent?key=${encodeURIComponent(keyActiva)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature, maxOutputTokens: maxTokens, responseMimeType: 'application/json' }
-        })
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig })
       });
       if (resp.ok) return resp;
       const errTxt = await resp.text();
@@ -2323,13 +2326,14 @@ function limpiarYParsearJSON(texto) {
 async function llamarIA(prompt, opts = {}) {
   const temperature = opts.temperature ?? 0.2;
   const maxTokens = opts.maxTokens ?? 2500;
+  const jsonMode = opts.jsonMode ?? true;
   const proveedor = getProveedorActivo();
   if (proveedor === 'gemini') {
     const modelos = await obtenerModelosDisponiblesGemini();
     let lastErr = '';
     for (const m of modelos) {
       try {
-        const resp = await fetchGeminiConRotacion(m, prompt, temperature, maxTokens);
+        const resp = await fetchGeminiConRotacion(m, prompt, temperature, maxTokens, jsonMode);
         const respText = await resp.text();
         if (!resp.ok) { lastErr = respText; continue; }
         const d = JSON.parse(respText);
@@ -3621,6 +3625,7 @@ async function guardarKeys() {
   }
 
   setProveedorActivo(proveedorSeleccionado);
+  setFallbackTranscripcionActivo(document.getElementById('chk-transcripcion-fallback').checked);
 
   // ── Groq ──
   if (keyGroqPrincipal) {
@@ -3662,6 +3667,8 @@ async function guardarKeys() {
 function abrirConfig() {
   const sel = document.getElementById('select-proveedor-ia');
   if (sel) sel.value = getProveedorActivo();
+  const chk = document.getElementById('chk-transcripcion-fallback');
+  if (chk) chk.checked = getFallbackTranscripcionActivo();
   document.getElementById('setup-overlay').classList.remove('hidden');
 }
 
@@ -3844,6 +3851,98 @@ async function transcribirAudio(file, groqKey) {
   });
   if (!whisperResp.ok) throw new Error('Groq Whisper: ' + await whisperResp.text());
   return (await whisperResp.json()).text;
+}
+
+const PROMPT_TRANSCRIPCION_GEMINI = `Transcribe esta llamada de un call center de admisiones educativas en México, en español. Sigue estas reglas ESTRICTAMENTE:
+- Identifica y etiqueta cada intervención como "Asesor:" o "Prospecto:" en texto PLANO, sin negritas, sin asteriscos, sin ningún formato Markdown.
+- Transcribe el contenido completo, palabra por palabra, sin resumir ni omitir partes.
+- No traduzcas ni corrijas gramática — transcribe tal como se habla, incluyendo muletillas si son claras.
+- Si hay partes inaudibles, indica "[inaudible]" en vez de inventar contenido.
+- ⚠️ PROHIBIDO: no agregues NINGÚN preámbulo, saludo, confirmación ni comentario antes o después. Tu respuesta debe empezar DIRECTAMENTE con la primera etiqueta de hablante ("Asesor:" o "Prospecto:") y terminar directamente con la última línea transcrita.`;
+
+// Limpieza de red de seguridad — quita negritas y cualquier preámbulo antes del primer hablante,
+// por si el modelo ignora las instrucciones (ya visto en pruebas con modelos "no-lite").
+function limpiarTranscripcionGemini(texto) {
+  let limpio = texto.replace(/\*\*/g, '').trim();
+  const match = limpio.match(/^(Asesor|Prospecto):/m);
+  if (match && match.index > 0) limpio = limpio.slice(match.index).trim();
+  return limpio;
+}
+
+async function transcribirAudioGemini(file) {
+  const base64 = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(',')[1]);
+    r.onerror = () => reject(new Error('No se pudo leer el archivo de audio'));
+    r.readAsDataURL(file);
+  });
+  const modelos = await obtenerModelosDisponiblesGemini();
+  let lastErr = '';
+  for (const m of modelos) {
+    const key = getGeminiKeyActiva();
+    if (!key) throw new Error('Sin API key de Gemini configurada');
+    try {
+      const resp = await fetch(`${GEMINI_API_BASE}models/${m}:generateContent?key=${encodeURIComponent(key)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { inlineData: { mimeType: file.type || 'audio/mpeg', data: base64 } },
+            { text: PROMPT_TRANSCRIPCION_GEMINI }
+          ]}],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 4000 }
+        })
+      });
+      if (!resp.ok) { lastErr = await resp.text(); continue; }
+      const data = await resp.json();
+      const texto = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!texto) { lastErr = `Sin contenido (finishReason: ${data.candidates?.[0]?.finishReason||'?'})`; continue; }
+      return limpiarTranscripcionGemini(texto);
+    } catch(e) { lastErr = e.message; continue; }
+  }
+  throw new Error('Gemini (transcripción) falló: ' + lastErr);
+}
+
+function getFallbackTranscripcionActivo() {
+  return localStorage.getItem('prueba_qa_transcripcion_fallback') !== '0'; // activado por default
+}
+function setFallbackTranscripcionActivo(v) {
+  localStorage.setItem('prueba_qa_transcripcion_fallback', v ? '1' : '0');
+}
+
+// Punto único de entrada para transcribir: usa el proveedor activo primero; si falla Y el
+// respaldo automático está activado Y el otro proveedor tiene key configurada, lo intenta con ese.
+async function transcribirAudioIA(file) {
+  const proveedor = getProveedorActivo();
+  const hayGroq = !!(localStorage.getItem('prueba_qa_groq_key'));
+  const hayGemini = !!(getGeminiKeyActiva());
+  const fallbackOn = getFallbackTranscripcionActivo();
+
+  const intentar = async (prov) => {
+    if (prov === 'gemini') return await transcribirAudioGemini(file);
+    return await transcribirAudio(file, getGroqKeyActiva());
+  };
+
+  const primero = proveedor === 'gemini' ? 'gemini' : 'groq';
+  const segundo  = primero === 'gemini' ? 'groq' : 'gemini';
+  const hayPrimero = primero === 'gemini' ? hayGemini : hayGroq;
+  const haySegundo  = segundo === 'gemini' ? hayGemini : hayGroq;
+
+  if (!hayPrimero && !haySegundo) {
+    throw new Error(`No hay ninguna API key configurada para transcribir (ni Groq ni Gemini).`);
+  }
+  if (!hayPrimero) {
+    // El proveedor activo no tiene key — usar el otro directo, sin necesidad del toggle de respaldo
+    return await intentar(segundo);
+  }
+  try {
+    return await intentar(primero);
+  } catch(e) {
+    if (fallbackOn && haySegundo) {
+      console.warn(`Transcripción con ${primero} falló (${e.message}), intentando respaldo con ${segundo}...`);
+      return await intentar(segundo);
+    }
+    throw e;
+  }
 }
 
 async function evaluarTranscripcion(transcripcion, agente, tipo, campana, groqKey, modelo, _unused, duracionSegundos) {
@@ -4315,7 +4414,7 @@ ${naKeys.has('etq_control')?'':'etq_control (6.5) — Mute, tiempos de espera y 
 async function procesarLlamada() {
   if (!audioFile) { alert('Por favor selecciona un archivo de audio.'); return; }
   const groqKey = localStorage.getItem('prueba_qa_groq_key');
-  if (!groqKey) { abrirConfig(); return; }
+  if (!groqKey && !getGeminiKeyActiva()) { abrirConfig(); return; }
   const agente        = document.getElementById('f-agente').value.trim() || 'No especificado';
   const tipo          = document.getElementById('f-tipo').value;
   const campana       = document.getElementById('f-campana').value.trim() || '';
@@ -4329,7 +4428,7 @@ async function procesarLlamada() {
   try {
     setStep(2); log('Leyendo archivo de audio...','spin');
     log('Enviando audio a Groq Whisper...','spin');
-    transcripcion = await transcribirAudio(audioFile, groqKey);
+    transcripcion = await transcribirAudioIA(audioFile);
     log('Audio transcrito ('+transcripcion.split(' ').length+' palabras)','ok');
     log('Midiendo duración del audio...','spin');
     const duracion = await medirDuracionAudio(audioFile);
@@ -4964,7 +5063,7 @@ async function iniciarBatch() {
   const pending = batchQueue.filter(i => i.status==='pending');
   if (!pending.length) { alert('No hay llamadas pendientes en la cola.'); return; }
   const groqKey = localStorage.getItem('prueba_qa_groq_key');
-  if (!groqKey) { abrirConfig(); return; }
+  if (!groqKey && !getGeminiKeyActiva()) { abrirConfig(); return; }
 
   const tipo    = document.getElementById('b-tipo').value;
   const campana = document.getElementById('b-campana').value.trim();
@@ -5002,7 +5101,7 @@ async function iniciarBatch() {
       document.getElementById('bs-act').textContent = '⚡ ' + item.file.name.slice(0,30);
 
       // 1. Transcribir
-      const transcripcion = await transcribirAudio(item.file, groqKey);
+      const transcripcion = await transcribirAudioIA(item.file);
 
       // 2. Medir duración (necesaria para las reglas de calibración del prompt)
       const duracion = await medirDuracionAudio(item.file);
@@ -6200,7 +6299,7 @@ function showChartTip(e,el){const tip=document.getElementById('rep-tooltip');if(
 function hideChartTip(){const tip=document.getElementById('rep-tooltip');if(tip)tip.style.display='none';}
 
 async function generarPlanIA() {
-  const groqKey=localStorage.getItem('prueba_qa_groq_key'); if(!groqKey){abrirConfig();return;}
+  if (!localStorage.getItem('prueba_qa_groq_key') && !getGeminiKeyActiva()) { abrirConfig(); return; }
   const data=filtrarPorPeriodo(); if(!data.length){alert('Sin datos en el período.');return;}
   const btn=document.getElementById('btn-gen-plan'), box=document.getElementById('rep-plan-box');
   btn.disabled=true; btn.innerHTML='<span class="spinning">◌</span> Generando...';
@@ -6504,18 +6603,10 @@ ${secRecomIndividual}
 
 Tono profesional y directo. Sin markdown, solo texto plano.`;
 
-  const MODELOS = await obtenerModelosDisponibles(groqKey);
-  let resultado='';
-  for(const m of MODELOS){
-    try{
-      const resp=await fetchGroqConRotacion('https://api.groq.com/openai/v1/chat/completions',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({model:m,messages:[{role:'user',content:prompt}],temperature:0.4,max_tokens:1800})
-      });
-      if(resp.ok){const d=await resp.json();resultado=d.choices[0].message.content.trim();break;}
-    }catch(e){}
-  }
+  let resultado = '';
+  try {
+    resultado = (await llamarIA(prompt, { temperature: 0.4, maxTokens: 1800, jsonMode: false })).trim();
+  } catch(e) { console.warn('Error generando plan de mejora:', e.message); }
   box.className='ai-plan-box'; box.textContent=resultado||'No se pudo generar el plan. Verifica tu API key.';
   // Guardar contexto para el chat y mostrar input
   window._planChatContext = { planActual: resultado, datos: data, resumenAgentes, etapasResumen };
@@ -6533,8 +6624,7 @@ async function preguntarPlanIA() {
   if (!pregunta || !window._planChatContext) return;
   input.value = '';
 
-  const groqKey = localStorage.getItem('prueba_qa_groq_key');
-  if (!groqKey) { alert('Configura tu API key primero.'); return; }
+  if (!localStorage.getItem('prueba_qa_groq_key') && !getGeminiKeyActiva()) { alert('Configura tu API key primero.'); return; }
 
   // Mostrar mensaje del usuario
   const addMsg = (txt, esUsuario) => {
@@ -6567,25 +6657,11 @@ Responde de forma concisa y directa. Sin markdown. Máximo 200 palabras.`;
   // Historial de conversación
   window._planChatHistory.push({ role: 'user', content: pregunta });
 
-  const MODELOS = await obtenerModelosDisponibles(groqKey);
   let respuesta = '';
-  for (const m of MODELOS) {
-    try {
-      const resp = await fetchGroqConRotacion('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: m,
-          messages: [
-            { role: 'user', content: systemCtx + '\n\n---\n' + window._planChatHistory.map(h=>`${h.role==='user'?'Pregunta':'Respuesta'}: ${h.content}`).join('\n') }
-          ],
-          temperature: 0.3,
-          max_tokens: 400
-        })
-      });
-      if (resp.ok) { const d = await resp.json(); respuesta = d.choices[0].message.content.trim(); break; }
-    } catch(e) {}
-  }
+  try {
+    const promptCompleto = systemCtx + '\n\n---\n' + window._planChatHistory.map(h=>`${h.role==='user'?'Pregunta':'Respuesta'}: ${h.content}`).join('\n');
+    respuesta = (await llamarIA(promptCompleto, { temperature: 0.3, maxTokens: 400, jsonMode: false })).trim();
+  } catch(e) { console.warn('Error en chat de plan de mejora:', e.message); }
 
   loadingEl.textContent = respuesta || 'No se pudo obtener respuesta.';
   window._planChatHistory.push({ role: 'assistant', content: respuesta });
@@ -6956,8 +7032,7 @@ function toggleTopFromList(id) {
 let _docTopContent = '';
 
 async function generarDocumentoTop() {
-  const groqKey = localStorage.getItem('prueba_qa_groq_key');
-  if (!groqKey) { abrirConfig(); return; }
+  if (!localStorage.getItem('prueba_qa_groq_key') && !getGeminiKeyActiva()) { abrirConfig(); return; }
   const modeloF = document.getElementById('top-modelo-filter')?.value || '__todos__';
   let tops = historial.filter(h=>h.es_top);
   if (modeloF !== '__todos__') tops = tops.filter(h=>(h.modelo||'tradicional')===modeloF);
@@ -6988,14 +7063,10 @@ Genera un documento estructurado con:
 
 Formato: texto claro, profesional, sin markdown, con secciones numeradas.`;
 
-  const MODELOS_G = await obtenerModelosDisponibles(groqKey);
   let resultado = '';
-  for (const m of MODELOS_G) {
-    try {
-      const resp = await fetchGroqConRotacion('https://api.groq.com/openai/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:m,messages:[{role:'user',content:prompt}],temperature:0.4,max_tokens:2000})});
-      if (resp.ok) { const d=await resp.json(); resultado=d.choices[0].message.content.trim(); break; }
-    } catch(e){}
-  }
+  try {
+    resultado = (await llamarIA(prompt, { temperature: 0.4, maxTokens: 2000, jsonMode: false })).trim();
+  } catch(e) { console.warn('Error generando documento Top Calls:', e.message); }
   _docTopContent = resultado || 'No se pudo generar el documento.';
   if (box) { box.className='ai-plan-box'; box.textContent=_docTopContent; }
 }
